@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package cosmos.accounts.testing.multisig.v1;
+
+// MsgInit is the init message used to create a new account
+// abstraction implementation that we use for testing, this account
+// also allows for rotating the public key.
+message MsgInit {
+  repeated Member members = 1;
+}
+
+message Member {
+  bytes  pub_key_bytes = 1;
+  uint64 weight        = 2;
+}
+
+// MsgInitResponse is the init message response.
+message MsgInitResponse {}
+
+// MsgRotatePubKey is the message used to swap the public key
+// of the account.
+message MsgRotatePubKey {
+  bytes new_pub_key_bytes = 1;
+}
+
+// MsgRotatePubKeyResponse is the MsgRotatePubKey response.
+message MsgRotatePubKeyResponse {}
