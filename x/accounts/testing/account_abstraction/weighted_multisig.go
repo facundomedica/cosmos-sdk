@@ -1,6 +1,7 @@
 package account_abstraction
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 	"cosmossdk.io/collections"
 	"cosmossdk.io/x/accounts/accountstd"
 	"cosmossdk.io/x/accounts/internal/implementation"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/herumi/bls-eth-go-binary/bls"
 )
 
 var _ accountstd.Interface = (*WeightedMultiSigAccount)(nil)
@@ -18,6 +19,10 @@ var _ accountstd.Interface = (*WeightedMultiSigAccount)(nil)
 var (
 	MembersPrefix = collections.NewPrefix(0)
 )
+
+func init() {
+	bls.Init(bls.BLS12_381)
+}
 
 func NewWeightedMultiSigAccount(d accountstd.Dependencies) (WeightedMultiSigAccount, error) {
 	return WeightedMultiSigAccount{
@@ -55,37 +60,39 @@ func (a WeightedMultiSigAccount) Authenticate(ctx context.Context, msg *account_
 		bytesToHash = append(bytesToHash, []byte(v.TypeUrl)...)
 		bytesToHash = append(bytesToHash, v.Value...)
 	}
-	hash := sha256.Sum256(bytesToHash)
 
-	sigs, err := parseSigs(msg.UserOperation.AuthenticationData)
+	signmsgs := []byte{}
+	for i := 0; i < 5; i++ {
+		hash := sha256.Sum256(append(bytesToHash, byte(i)))
+		signmsgs = append(signmsgs, hash[:]...)
+	}
 
+	sig, msgsss := msg.UserOperation.AuthenticationData[:96], msg.UserOperation.AuthenticationData[96:]
+	agg := bls.Sign{}
+	err := agg.Deserialize(sig)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 
-	totalWeight := uint64(0)
-	pass := false
-
-	for _, sig := range sigs {
-		pkey, _, err := ecdsa.RecoverCompact(sig, hash[:])
-		if err != nil {
-			return nil, err
-		}
-
-		weight, err := a.Members.Get(ctx, pkey.SerializeCompressed())
-		if err != nil {
-			return nil, err
-		}
-
-		totalWeight += weight
-		if totalWeight > 666 { // TODO: make this configurable
-			pass = true
-			break
-		}
+	if !bytes.Equal(signmsgs, msgsss) {
+		panic("not equal")
 	}
 
-	if !pass {
-		return nil, fmt.Errorf("not enough weight: %d", totalWeight)
+	pubkeys := []bls.PublicKey{}
+	a.Members.Walk(
+		ctx,
+		nil,
+		func(key []byte, value uint64) (stop bool, err error) {
+			pkey := bls.PublicKey{}
+			pkey.Deserialize(key)
+			pubkeys = append(pubkeys, pkey)
+			return false, nil
+		},
+	)
+
+	verified := agg.AggregateVerify(pubkeys, signmsgs)
+	if !verified {
+		return nil, fmt.Errorf("wrong sig")
 	}
 
 	_, err = a.Sequence.Next(ctx)
@@ -100,16 +107,9 @@ func parseSigs(sigs []byte) ([][]byte, error) { //([]sig, error) {
 		return nil, fmt.Errorf("invalid signature length")
 	}
 	allSigs := make([][]byte, len(sigs)/65)
-	// var allSigs []sig
 	for i := 0; i < len(sigs); i += 65 {
 		allSigs[i/65] = sigs[i : i+65]
 	}
-	// 	v, r, s, err := parseVRS(sigs[i : i+65])
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	allSigs = append(allSigs, sig{V: v, R: r, S: s})
-	// }
 	return allSigs, nil
 }
 

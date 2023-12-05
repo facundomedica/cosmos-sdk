@@ -1,7 +1,9 @@
 package account_abstraction
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"sort"
 	"testing"
 
 	account_abstractionv1 "cosmossdk.io/api/cosmos/accounts/interfaces/account_abstraction/v1"
@@ -14,10 +16,8 @@ import (
 	"cosmossdk.io/x/accounts/accountstd"
 	"github.com/cosmos/cosmos-proto/anyutil"
 	"github.com/cosmos/cosmos-sdk/codec/address"
-	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	dcredsecp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -33,18 +33,22 @@ func TestAuthenticate(t *testing.T) {
 	ms, err := NewWeightedMultiSigAccount(deps)
 	require.NoError(t, err)
 
-	keys := []*secp256k1.PrivKey{}
+	keys := []bls.SecretKey{}
 
-	for i := 0; i < 10; i++ {
-		k := secp256k1.GenPrivKey()
-		require.NoError(t, err)
+	for i := 0; i < 5; i++ {
+		k := bls.SecretKey{}
+		k.SetByCSPRNG()
 		keys = append(keys, k)
 	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		return bytes.Compare(keys[i].GetPublicKey().Serialize(), keys[j].GetPublicKey().Serialize()) < 0
+	})
 
 	members := []*multisigv1.Member{}
 	for _, k := range keys {
 		members = append(members, &multisigv1.Member{
-			PubKeyBytes: k.PubKey().Bytes(),
+			PubKeyBytes: k.GetPublicKey().Serialize(),
 			Weight:      100, // * 10 = 1000
 		})
 	}
@@ -65,24 +69,36 @@ func TestAuthenticate(t *testing.T) {
 		bytesToHash = append(bytesToHash, v.Value...)
 	}
 
-	hash := sha256.Sum256(bytesToHash)
-
-	sigs := []byte{}
-	for _, k := range keys {
+	var agg *bls.Sign
+	signmsgs := []byte{}
+	for i, k := range keys {
+		hash := sha256.Sum256(append(bytesToHash, byte(i)))
+		sig := k.SignByte(hash[:])
+		signmsgs = append(signmsgs, hash[:]...)
 		// this is what the sdk does but we remove the recovery id, which I need here
-		priv := dcredsecp256k1.PrivKeyFromBytes(k.Key)
-		sig := ecdsa.SignCompact(priv, hash[:], false)
-
-		require.NoError(t, err)
-		sigs = append(sigs, sig...)
-		break
+		// priv := dcredsecp256k1.PrivKeyFromBytes(k.Key)
+		// sig := ecdsa.SignCompact(priv, hash[:], false)
+		if agg == nil {
+			agg = sig
+		} else {
+			agg.Add(sig)
+		}
 	}
+
+	authdata := append(agg.Serialize(), signmsgs...)
+	pubkeys := []bls.PublicKey{}
+	for _, v := range keys {
+		pubkeys = append(pubkeys, *v.GetPublicKey())
+	}
+
+	// do the sig check before the authentication just because
+	require.True(t, agg.AggregateVerify(pubkeys, signmsgs))
 
 	// test authentication
 	_, err = ms.Authenticate(ctx, &account_abstractionv1.MsgAuthenticate{
 		UserOperation: &accountsv1.UserOperation{
 			AuthenticationMethod: "secp256k1",
-			AuthenticationData:   sigs,
+			AuthenticationData:   authdata,
 			ExecutionMessages:    msgs,
 		},
 	})
